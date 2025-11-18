@@ -1,0 +1,244 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windshield Zone + Fit Validator</title>
+
+<style>
+    body { background:#111; color:#eee; font-family:Arial; text-align:center; padding:10px; }
+
+    #container {
+        position: relative;
+        width: 100%;
+        max-width: 500px;
+        margin:auto;
+    }
+
+    video, #capturedImg, #canvasOut {
+        width: 100%;
+        border-radius: 10px;
+    }
+
+    canvas { display: none; }
+
+    #overlay {
+        position: absolute;
+        top: 50%; 
+        left: 50%;
+        width: 80%;
+        transform: translate(-50%, -50%);
+        opacity: 0.65;
+        pointer-events:none;
+        transition: outline 0.2s ease;
+    }
+
+    button {
+        margin-top: 12px;
+        padding: 12px 20px;
+        font-size: 16px;
+        border: none;
+        background: #1a73e8;
+        color:white;
+        border-radius: 8px;
+        cursor: pointer;
+    }
+
+    #info { white-space:pre-line; margin-top:15px; font-size:18px; }
+</style>
+</head>
+<body>
+
+<h2>Windshield Detector</h2>
+
+<div id="container">
+    <video id="camera" autoplay playsinline></video>
+    <canvas id="camCanvas"></canvas>
+    <img id="overlay" src="overlay.png">
+</div>
+
+<button id="captureBtn">Capture & Detect Damage</button>
+
+<br><br>
+
+<canvas id="canvasOut"></canvas>
+<div id="info"></div>
+
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+
+<script>
+// ---------- CAMERA SETUP ----------
+let video = document.getElementById("camera");
+let camCanvas = document.getElementById("camCanvas");
+let camCtx = camCanvas.getContext("2d");
+
+navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" } })
+.then(stream => video.srcObject = stream)
+.catch(err => alert("Camera error: " + err));
+
+video.addEventListener("loadeddata", () => {
+    camCanvas.width = video.videoWidth;
+    camCanvas.height = video.videoHeight;
+    overlay.style.width = camCanvas.width * 0.8 + "px";
+    setInterval(processLiveFrame, 300);
+});
+
+// ---------- LIVE OUTLINE FIT DETECTION ----------
+function processLiveFrame(){
+    camCtx.drawImage(video, 0,0, camCanvas.width, camCanvas.height);
+
+    let src = cv.imread(camCanvas);
+    let gray = new cv.Mat();
+    let edges = new cv.Mat();
+
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.Canny(gray, edges, 70, 150);
+
+    let edgeValue = cv.countNonZero(edges);
+    let threshold = 18000;
+
+    overlay.style.outline = (edgeValue > threshold) ? 
+        "5px solid lime" : "5px solid red";
+
+    src.delete(); gray.delete(); edges.delete();
+}
+
+// ---------- CAPTURE → RUN DAMAGE DETECTION ----------
+document.getElementById("captureBtn").onclick = () => {
+    if (!overlay.style.outline.includes("lime")) {
+        alert("Fit the windshield properly first!");
+        return;
+    }
+
+    let img = new Image();
+    img.onload = () => detectDamage(img);
+
+    img.src = camCanvas.toDataURL();
+};
+
+// ==========================================================
+//      DAMAGE ZONE DETECTOR  
+// ==========================================================
+
+const REF_W = 2048, REF_H = 1024;
+
+const ZONE_A_POLY = [
+  [200,250],[420,250],[420,780],[200,780]
+];
+const ZONE_B1 = { cx:420, cy:780, r:250 };
+const ZONE_B2_POLY = [
+  [420,250],[820,250],[650,780],[420,780]
+];
+const ZONE_C = { cx:1250, cy:780, r:550 };
+
+function scalePoint(pt, sw, sh){ return [ Math.round(pt[0]*sw/REF_W), Math.round(pt[1]*sh/REF_H) ]; }
+function scaleCircle(c, sw, sh){
+  return { cx:Math.round(c.cx*sw/REF_W),
+           cy:Math.round(c.cy*sh/REF_H),
+           r: Math.round(c.r*Math.min(sw/REF_W, sh/REF_H)) };
+}
+function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c.height=h; return c; }
+function fillPolygon(ctx, pts){
+  ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+  ctx.closePath(); ctx.fill();
+}
+
+function buildMasksForSize(w,h){
+  const A_pts = ZONE_A_POLY.map(p=>scalePoint(p,w,h));
+  const B2_pts= ZONE_B2_POLY.map(p=>scalePoint(p,w,h));
+  const B1    = scaleCircle(ZONE_B1,w,h);
+  const Cc    = scaleCircle(ZONE_C,w,h);
+
+  function createMask(draw){
+    let c=makeCanvas(w,h), ctx=c.getContext("2d");
+    ctx.fillStyle="black"; ctx.fillRect(0,0,w,h);
+    ctx.fillStyle="white"; draw(ctx);
+    return c;
+  }
+
+  return {
+    A: createMask(ctx=>fillPolygon(ctx,A_pts)),
+    B1:createMask(ctx=>{ctx.beginPath();ctx.arc(B1.cx,B1.cy,B1.r,0,2*Math.PI);ctx.fill();}),
+    B2:createMask(ctx=>fillPolygon(ctx,B2_pts)),
+    C: createMask(ctx=>{ctx.beginPath();ctx.arc(Cc.cx,Cc.cy,Cc.r,0,2*Math.PI);ctx.fill();})
+  };
+}
+
+function canvasToBinaryMat(canvas){
+  const mat=cv.imread(canvas);
+  let g=new cv.Mat(); cv.cvtColor(mat,g,cv.COLOR_RGBA2GRAY);
+  let b=new cv.Mat(); cv.threshold(g,b,10,255,cv.THRESH_BINARY);
+  mat.delete(); g.delete(); return b;
+}
+
+// -------- DAMAGE DETECTION MAIN FUNCTION ----------
+function detectDamage(img){
+  const canvasOut=document.getElementById("canvasOut");
+  const w=img.naturalWidth, h=img.naturalHeight;
+  canvasOut.width=w; canvasOut.height=h;
+  let ctx=canvasOut.getContext("2d");
+  ctx.drawImage(img,0,0);
+
+  let masks=buildMasksForSize(w,h);
+
+  let src=cv.imread(canvasOut);
+  let gray=new cv.Mat(); cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+  let blur=new cv.Mat(); cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);
+  let edges=new cv.Mat(); cv.Canny(blur,edges,70,150);
+
+  const mats = {
+    A:canvasToBinaryMat(masks.A),
+    B1:canvasToBinaryMat(masks.B1),
+    B2:canvasToBinaryMat(masks.B2),
+    C: canvasToBinaryMat(masks.C)
+  };
+
+  const TH=40;
+  let zonesHit=[];
+
+  for(const [zn,m] of Object.entries(mats)){
+    let o=new cv.Mat(); cv.bitwise_and(edges,m,o);
+    if(cv.countNonZero(o)>TH) zonesHit.push(zn);
+    o.delete();
+  }
+
+  let finalZones=[];
+  if(zonesHit.includes("B1")||zonesHit.includes("B2")) finalZones.push("B");
+  if(zonesHit.includes("A")) finalZones.push("A");
+  if(zonesHit.includes("C")) finalZones.push("C");
+
+  finalZones=[...new Set(finalZones)];
+
+  let result = "";
+
+  if(finalZones.length===0){
+      result = "No damage detected.";
+      document.getElementById("info").innerText = result;
+      cleanup();
+      return;
+  }
+
+  result += "Zones Impacted: " + finalZones.join(", ") + "\n\n";
+
+  // REPAIRABILITY
+  let repairable = true;
+
+  if (finalZones.includes("A")) repairable = false;
+  if (finalZones.length > 1) repairable = false;
+
+  result += repairable ? "Repairable" : "Not Repairable";
+  document.getElementById("info").innerText = result;
+
+  cleanup();
+
+  function cleanup(){
+    src.delete(); gray.delete(); blur.delete(); edges.delete();
+    for(const m of Object.values(mats)) m.delete();
+  }
+}
+
+</script>
+
+</body>
+</html>
