@@ -3,58 +3,40 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Windshield Zone + Fit Validator</title>
+<title>Windshield Zone + Fit Validator (fixed)</title>
 
 <style>
-    body { background:#111; color:#eee; font-family:Arial; text-align:center; padding:10px; }
-
-    #container {
-        position: relative;
-        width: 100%;
-        max-width: 500px;
-        margin:auto;
+  body { background:#111; color:#eee; font-family:Arial; text-align:center; padding:10px; }
+  #container { position: relative; width: 100%; max-width: 640px; margin:auto; }
+  video, #capturedImg, #canvasOut { width: 100%; border-radius: 10px; background:#000; }
+  canvas { display: none; }
+  #overlay {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 80%;
+      transform: translate(-50%, -50%);
+      opacity: 0.85;
+      pointer-events:none;
+      transition: outline 0.2s ease;
+      image-rendering: pixelated;
     }
-
-    video, #capturedImg, #canvasOut {
-        width: 100%;
-        border-radius: 10px;
-    }
-
-    canvas { display: none; }
-
-    #overlay {
-        position: absolute;
-        top: 50%; 
-        left: 50%;
-        width: 80%;
-        transform: translate(-50%, -50%);
-        opacity: 0.65;
-        pointer-events:none;
-        transition: outline 0.2s ease;
-    }
-
-    button {
-        margin-top: 12px;
-        padding: 12px 20px;
-        font-size: 16px;
-        border: none;
-        background: #1a73e8;
-        color:white;
-        border-radius: 8px;
-        cursor: pointer;
-    }
-
-    #info { white-space:pre-line; margin-top:15px; font-size:18px; }
+  button {
+    margin-top: 12px; padding: 12px 20px; font-size: 16px; border: none;
+    background: #1a73e8; color:white; border-radius: 8px; cursor: pointer;
+  }
+  #info { white-space:pre-line; margin-top:15px; font-size:16px; }
 </style>
 </head>
 <body>
 
-<h2>Windshield Detector</h2>
+<h2>Windshield Detector — Fixed</h2>
 
 <div id="container">
     <video id="camera" autoplay playsinline></video>
     <canvas id="camCanvas"></canvas>
-    <img id="overlay" src="overlay.png">
+    <!-- overlay.png should be 274x139 in your project -->
+    <img id="overlay" src="overlay.png" alt="overlay">
 </div>
 
 <button id="captureBtn">Capture & Detect Damage</button>
@@ -62,181 +44,244 @@
 <br><br>
 
 <canvas id="canvasOut"></canvas>
-<div id="info"></div>
+<div id="info">Status: waiting for camera...</div>
 
+<!-- OpenCV -->
 <script src="https://docs.opencv.org/4.x/opencv.js"></script>
 
 <script>
-// ---------- CAMERA SETUP ----------
-let video = document.getElementById("camera");
-let camCanvas = document.getElementById("camCanvas");
-let camCtx = camCanvas.getContext("2d");
+// ------------------- CONFIG -------------------
+const REF_W = 2048, REF_H = 1024; // reference coordinates (kept same as your original)
+const OVERLAY_NATURAL_W = 274, OVERLAY_NATURAL_H = 139; // exact overlay.png size you provided
 
-navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" } })
-.then(stream => video.srcObject = stream)
-.catch(err => alert("Camera error: " + err));
+// detection thresholds (tuned)
+const LIVE_EDGE_THRESHOLD = 18000; // for live fit detection (edge count)
+const DAMAGE_TH = 300;             // min edge pixels inside zone to mark as hit
+const CANNY_LOW = 70, CANNY_HIGH = 150;
 
-video.addEventListener("loadeddata", () => {
-    camCanvas.width = video.videoWidth;
-    camCanvas.height = video.videoHeight;
-    overlay.style.width = camCanvas.width * 0.8 + "px";
-    setInterval(processLiveFrame, 300);
-});
-
-// ---------- LIVE OUTLINE FIT DETECTION ----------
-function processLiveFrame(){
-    camCtx.drawImage(video, 0,0, camCanvas.width, camCanvas.height);
-
-    let src = cv.imread(camCanvas);
-    let gray = new cv.Mat();
-    let edges = new cv.Mat();
-
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.Canny(gray, edges, 70, 150);
-
-    let edgeValue = cv.countNonZero(edges);
-    let threshold = 18000;
-
-    overlay.style.outline = (edgeValue > threshold) ? 
-        "5px solid lime" : "5px solid red";
-
-    src.delete(); gray.delete(); edges.delete();
-}
-
-// ---------- CAPTURE → RUN DAMAGE DETECTION ----------
-document.getElementById("captureBtn").onclick = () => {
-    if (!overlay.style.outline.includes("lime")) {
-        alert("Fit the windshield properly first!");
-        return;
-    }
-
-    let img = new Image();
-    img.onload = () => detectDamage(img);
-
-    img.src = camCanvas.toDataURL();
-};
-
-// ==========================================================
-//      DAMAGE ZONE DETECTOR  
-// ==========================================================
-
-const REF_W = 2048, REF_H = 1024;
-
-const ZONE_A_POLY = [
-  [200,250],[420,250],[420,780],[200,780]
-];
+// zone definitions in reference coords (approx shapes - adjusted for overlay)
+const ZONE_A_POLY = [ [200,250],[420,250],[420,780],[200,780] ];
+const ZONE_B2_POLY = [ [420,250],[820,250],[650,780],[420,780] ];
 const ZONE_B1 = { cx:420, cy:780, r:250 };
-const ZONE_B2_POLY = [
-  [420,250],[820,250],[650,780],[420,780]
-];
 const ZONE_C = { cx:1250, cy:780, r:550 };
 
-function scalePoint(pt, sw, sh){ return [ Math.round(pt[0]*sw/REF_W), Math.round(pt[1]*sh/REF_H) ]; }
-function scaleCircle(c, sw, sh){
-  return { cx:Math.round(c.cx*sw/REF_W),
-           cy:Math.round(c.cy*sh/REF_H),
-           r: Math.round(c.r*Math.min(sw/REF_W, sh/REF_H)) };
-}
+// ------------------- DOM -------------------
+const video = document.getElementById("camera");
+const camCanvas = document.getElementById("camCanvas");
+const camCtx = camCanvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const container = document.getElementById("container");
+const captureBtn = document.getElementById("captureBtn");
+const info = document.getElementById("info");
+const canvasOut = document.getElementById("canvasOut");
+
+// ------------------- CAMERA SETUP -------------------
+navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" } })
+.then(stream => { video.srcObject = stream; })
+.catch(err => { alert("Camera error: " + err); info.innerText = "Camera error: "+err; });
+
+video.addEventListener("loadeddata", () => {
+    // set canvas same resolution as incoming video
+    camCanvas.width = video.videoWidth || 1280;
+    camCanvas.height = video.videoHeight || 720;
+
+    // ensure overlay width matches camCanvas visually (we set overlay width 80% in CSS)
+    overlay.style.width = (camCanvas.width * 0.8) + "px";
+
+    // start live loop
+    setInterval(processLiveFrame, 300);
+    info.innerText = "Status: camera ready. Fit the windshield inside the overlay.";
+});
+
+// ------------------- UTIL: create canvas -------------------
 function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c.height=h; return c; }
-function fillPolygon(ctx, pts){
-  ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
-  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
-  ctx.closePath(); ctx.fill();
+function fillPolygon(ctx, pts){ ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]); for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]); ctx.closePath(); ctx.fill(); }
+
+// ------------------- LIVE FIT DETECTION -------------------
+function processLiveFrame(){
+    // draw current camera frame to camCanvas
+    camCtx.drawImage(video, 0, 0, camCanvas.width, camCanvas.height);
+
+    // quick edge detection using OpenCV on the camCanvas
+    try {
+      let src = cv.imread(camCanvas);
+      let gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      let edges = new cv.Mat(); cv.Canny(gray, edges, CANNY_LOW, CANNY_HIGH);
+      let edgeValue = cv.countNonZero(edges);
+
+      // set outline green when edge count exceeds threshold (approx fit)
+      overlay.style.outline = (edgeValue > LIVE_EDGE_THRESHOLD) ? "5px solid lime" : "5px solid red";
+
+      src.delete(); gray.delete(); edges.delete();
+    } catch(e){
+      // OpenCV may not be ready yet
+      //console.log("cv error", e);
+    }
 }
 
-function buildMasksForSize(w,h){
-  const A_pts = ZONE_A_POLY.map(p=>scalePoint(p,w,h));
-  const B2_pts= ZONE_B2_POLY.map(p=>scalePoint(p,w,h));
-  const B1    = scaleCircle(ZONE_B1,w,h);
-  const Cc    = scaleCircle(ZONE_C,w,h);
+// ------------------- MASK BUILDING (full-image masks with offset) -------------------
 
-  function createMask(draw){
-    let c=makeCanvas(w,h), ctx=c.getContext("2d");
-    ctx.fillStyle="black"; ctx.fillRect(0,0,w,h);
-    ctx.fillStyle="white"; draw(ctx);
+function buildMasksForImage(wImg, hImg, offX, offY, ow, oh){
+  const sx = ow / REF_W;
+  const sy = oh / REF_H;
+
+  // helper to scale a reference point then translate to overlay position
+  function spt(pt){ return [ Math.round(pt[0]*sx) + offX, Math.round(pt[1]*sy) + offY ]; }
+
+  // scale circle -> ellipse radii
+  function sCircle(c){
+    const cx = Math.round(c.cx * sx) + offX;
+    const cy = Math.round(c.cy * sy) + offY;
+    const rx = Math.round(c.r * sx);
+    const ry = Math.round(c.r * sy);
+    return { cx, cy, rx, ry };
+  }
+
+  // create a mask canvas (full image size) with black bg and white shape
+  function createMask(drawShape){
+    let c = makeCanvas(wImg, hImg);
+    let ctx = c.getContext("2d");
+    ctx.fillStyle = "black"; ctx.fillRect(0,0,wImg,hImg);
+    ctx.fillStyle = "white";
+    drawShape(ctx);
     return c;
   }
 
+  // A polygon scaled and translated
+  const A_pts = ZONE_A_POLY.map(p=>spt(p));
+  const B2_pts = ZONE_B2_POLY.map(p=>spt(p));
+  const B1_e = sCircle(ZONE_B1);
+  const C_e  = sCircle(ZONE_C);
+
   return {
-    A: createMask(ctx=>fillPolygon(ctx,A_pts)),
-    B1:createMask(ctx=>{ctx.beginPath();ctx.arc(B1.cx,B1.cy,B1.r,0,2*Math.PI);ctx.fill();}),
-    B2:createMask(ctx=>fillPolygon(ctx,B2_pts)),
-    C: createMask(ctx=>{ctx.beginPath();ctx.arc(Cc.cx,Cc.cy,Cc.r,0,2*Math.PI);ctx.fill();})
+    A: createMask(ctx => fillPolygon(ctx, A_pts)),
+    B1: createMask(ctx => {
+        ctx.beginPath();
+        // use ellipse to respect x/y scaling
+        ctx.ellipse(B1_e.cx, B1_e.cy, B1_e.rx, B1_e.ry, 0, 0, 2*Math.PI);
+        ctx.fill();
+    }),
+    B2: createMask(ctx => fillPolygon(ctx, B2_pts)),
+    C: createMask(ctx => {
+        ctx.beginPath();
+        ctx.ellipse(C_e.cx, C_e.cy, C_e.rx, C_e.ry, 0, 0, 2*Math.PI);
+        ctx.fill();
+    })
   };
 }
 
+// Convert a mask canvas (white shape on black bg) to binary cv.Mat
 function canvasToBinaryMat(canvas){
-  const mat=cv.imread(canvas);
-  let g=new cv.Mat(); cv.cvtColor(mat,g,cv.COLOR_RGBA2GRAY);
-  let b=new cv.Mat(); cv.threshold(g,b,10,255,cv.THRESH_BINARY);
-  mat.delete(); g.delete(); return b;
+  const m = cv.imread(canvas); // RGBA
+  let g = new cv.Mat(); cv.cvtColor(m, g, cv.COLOR_RGBA2GRAY);
+  let b = new cv.Mat(); cv.threshold(g, b, 10, 255, cv.THRESH_BINARY);
+  m.delete(); g.delete();
+  return b;
 }
 
-// -------- DAMAGE DETECTION MAIN FUNCTION ----------
+// ------------------- CAPTURE & DAMAGE DETECTION -------------------
+captureBtn.onclick = () => {
+  // require green outline (fit) before capture
+  if (!overlay.style.outline.includes("lime")) {
+    alert("Fit the windshield properly inside the overlay first!");
+    return;
+  }
+
+  // draw current camera frame to camCanvas and prepare an Image
+  camCtx.drawImage(video, 0, 0, camCanvas.width, camCanvas.height);
+  let img = new Image();
+  img.onload = () => detectDamage(img);
+  img.src = camCanvas.toDataURL("image/png");
+};
+
 function detectDamage(img){
-  const canvasOut=document.getElementById("canvasOut");
-  const w=img.naturalWidth, h=img.naturalHeight;
-  canvasOut.width=w; canvasOut.height=h;
-  let ctx=canvasOut.getContext("2d");
-  ctx.drawImage(img,0,0);
+  // draw image to visible canvasOut at its native resolution
+  const w = img.naturalWidth || camCanvas.width;
+  const h = img.naturalHeight || camCanvas.height;
+  canvasOut.width = w; canvasOut.height = h;
+  const outCtx = canvasOut.getContext("2d");
+  outCtx.drawImage(img, 0, 0, w, h);
 
-  let masks=buildMasksForSize(w,h);
+  // determine overlay position & size on-screen and map to image pixel coords
+  // We use container/client rect because overlay is positioned relative to container visually
+  const containerRect = container.getBoundingClientRect();
+  const overlayRect = overlay.getBoundingClientRect();
 
-  let src=cv.imread(canvasOut);
-  let gray=new cv.Mat(); cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
-  let blur=new cv.Mat(); cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);
-  let edges=new cv.Mat(); cv.Canny(blur,edges,70,150);
+  // map overlay left/top/width/height from screen pixels to image pixels
+  const offX = Math.round((overlayRect.left - containerRect.left) * (w / containerRect.width));
+  const offY = Math.round((overlayRect.top  - containerRect.top ) * (h / containerRect.height));
+  const ow   = Math.round(overlayRect.width * (w / containerRect.width));
+  const oh   = Math.round(overlayRect.height * (h / containerRect.height));
 
+  // Build masks sized to full image but with shapes drawn only in overlay area
+  const masks = buildMasksForImage(w, h, offX, offY, ow, oh);
+
+  // run edge detection on full image
+  let src = cv.imread(canvasOut);
+  let gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  let blur = new cv.Mat(); cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+  let edges = new cv.Mat(); cv.Canny(blur, edges, CANNY_LOW, CANNY_HIGH);
+
+  // convert masks to cv mats
   const mats = {
-    A:canvasToBinaryMat(masks.A),
-    B1:canvasToBinaryMat(masks.B1),
-    B2:canvasToBinaryMat(masks.B2),
+    A: canvasToBinaryMat(masks.A),
+    B1: canvasToBinaryMat(masks.B1),
+    B2: canvasToBinaryMat(masks.B2),
     C: canvasToBinaryMat(masks.C)
   };
 
-  const TH=40;
-  let zonesHit=[];
-
-  for(const [zn,m] of Object.entries(mats)){
-    let o=new cv.Mat(); cv.bitwise_and(edges,m,o);
-    if(cv.countNonZero(o)>TH) zonesHit.push(zn);
+  // check each zone: bitwise_and edges & mask, count non-zero
+  let zonesHit = [];
+  for (const [zn, m] of Object.entries(mats)){
+    let o = new cv.Mat();
+    cv.bitwise_and(edges, m, o);
+    const cnt = cv.countNonZero(o);
+    // debug: optionally draw detections onto canvasOut (uncomment)
+    // console.log(zn, cnt);
+    if (cnt > DAMAGE_TH) zonesHit.push(zn);
     o.delete();
   }
 
-  let finalZones=[];
-  if(zonesHit.includes("B1")||zonesHit.includes("B2")) finalZones.push("B");
-  if(zonesHit.includes("A")) finalZones.push("A");
-  if(zonesHit.includes("C")) finalZones.push("C");
+  // combine B1 and B2 into B
+  let finalZones = [];
+  if (zonesHit.includes("B1") || zonesHit.includes("B2")) finalZones.push("B");
+  if (zonesHit.includes("A")) finalZones.push("A");
+  if (zonesHit.includes("C")) finalZones.push("C");
+  finalZones = [...new Set(finalZones)]; // unique
 
-  finalZones=[...new Set(finalZones)];
-
+  // Prepare result text
   let result = "";
-
-  if(finalZones.length===0){
-      result = "No damage detected.";
-      document.getElementById("info").innerText = result;
-      cleanup();
-      return;
+  if (finalZones.length === 0){
+    result = "No damage detected.";
+    info.innerText = result;
+    cleanup();
+    return;
   }
 
   result += "Zones Impacted: " + finalZones.join(", ") + "\n\n";
-
-  // REPAIRABILITY
+  // repairability logic: A or multiple => not repairable
   let repairable = true;
-
   if (finalZones.includes("A")) repairable = false;
   if (finalZones.length > 1) repairable = false;
-
   result += repairable ? "Repairable" : "Not Repairable";
-  document.getElementById("info").innerText = result;
+
+  info.innerText = result;
+
+  // Optional: visualize detection by overlaying red fill on canvasOut (only for debugging)
+  // drawMaskOverlayOnCanvas(canvasOut, masks, zonesHit);
 
   cleanup();
 
+  // cleanup mats
   function cleanup(){
-    src.delete(); gray.delete(); blur.delete(); edges.delete();
-    for(const m of Object.values(mats)) m.delete();
+    try {
+      src.delete(); gray.delete(); blur.delete(); edges.delete();
+    } catch(e){}
+    for (const m of Object.values(mats)) try{ m.delete(); } catch(e){}
   }
 }
+
+
 
 </script>
 
