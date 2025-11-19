@@ -70,56 +70,73 @@
 <script src="https://docs.opencv.org/4.x/opencv.js"></script>
 
 <script>
+// ====================== CONFIG ======================
+const COVERAGE_THRESHOLD = 0.50;  // 50%
+const MIN_QUAD_AREA = 0.10;       // ignore tiny quads
+
 let video = document.getElementById("camera");
 let camCanvas = document.getElementById("camCanvas");
 let ctx = camCanvas.getContext("2d");
 let frameIndicator = document.getElementById("frameIndicator");
-let captureBtn = document.getElementById("captureBtn");
-
 let canCapture = false;
 
-// -------------------- CAMERA SETUP --------------------
+// ====================== CAMERA ======================
 navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" } })
-.then(stream => video.srcObject = stream)
-.catch(err => alert("Camera error: " + err));
+.then(stream => video.srcObject = stream);
 
 video.addEventListener("loadeddata", () => {
     camCanvas.width = video.videoWidth;
     camCanvas.height = video.videoHeight;
-    setInterval(runDetection, 300);
+    setInterval(runDetection, 200);
 });
 
-// -------------------- MAIN DETECTION LOOP --------------------
+// ====================== MAIN DETECTION ======================
 function runDetection(){
     ctx.drawImage(video, 0, 0, camCanvas.width, camCanvas.height);
 
+    // --- Draw CENTER RECTANGLE ---
+    let cx = camCanvas.width * 0.15;
+    let cy = camCanvas.height * 0.15;
+    let cw = camCanvas.width * 0.70;
+    let ch = camCanvas.height * 0.70;
+
+    let guideRect = {x:cx, y:cy, w:cw, h:ch};
+
+    // Draw guide box (color later replaced)
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "yellow";
+    ctx.strokeRect(cx, cy, cw, ch);
+
+    // --- OpenCV processing ---
     let src = cv.imread(camCanvas);
     let gray = new cv.Mat();
     let blur = new cv.Mat();
     let edges = new cv.Mat();
-
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
-    cv.Canny(blur, edges, 80, 150);
-
     let contours = new cv.MatVector();
     let hierarchy = new cv.Mat();
+
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+    cv.Canny(blur, edges, 80, 150);
+
     cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
     let bestQuad = null;
     let bestArea = 0;
     let frameArea = camCanvas.width * camCanvas.height;
 
-    for (let i = 0; i < contours.size(); i++){
+    // --- Find best quadrilateral ---
+    for (let i=0; i<contours.size(); i++){
         let cnt = contours.get(i);
         let peri = cv.arcLength(cnt, true);
         let approx = new cv.Mat();
         cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-        if (approx.rows === 4) {
-            let cntArea = cv.contourArea(approx);
-            if (cntArea > bestArea){
-                bestArea = cntArea;
+        if (approx.rows === 4){
+            let area = cv.contourArea(approx);
+
+            if (area/frameArea > MIN_QUAD_AREA && area > bestArea){
+                bestArea = area;
                 bestQuad = approx;
             }
         }
@@ -130,29 +147,63 @@ function runDetection(){
     if (bestQuad){
         let coverage = bestArea / frameArea;
 
-        // 70% rule for validation
-        if (coverage >= 0.50){
+        // Get quad coords
+        let pts = [];
+        for (let i = 0; i < 4; i++){
+            pts.push({
+                x: bestQuad.intPtr(i,0)[0],
+                y: bestQuad.intPtr(i,0)[1]
+            });
+        }
+
+        // Draw detected quad
+        ctx.strokeStyle = "cyan";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i=1; i<4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
+        ctx.stroke();
+
+        // Check if quad is INSIDE guide box
+        let insideGuide = pts.every(p =>
+            p.x >= guideRect.x &&
+            p.x <= guideRect.x + guideRect.w &&
+            p.y >= guideRect.y &&
+            p.y <= guideRect.y + guideRect.h
+        );
+
+        // Final validation
+        if (insideGuide && coverage >= COVERAGE_THRESHOLD){
+            frameIndicator.style.borderColor = "lime";
+            ctx.strokeStyle = "lime";
+            ctx.strokeRect(cx, cy, cw, ch);
             canCapture = true;
+        } else {
+            frameIndicator.style.borderColor = "red";
+            ctx.strokeStyle = "red";
+            ctx.strokeRect(cx, cy, cw, ch);
         }
     }
 
-    frameIndicator.style.borderColor = canCapture ? "lime" : "red";
-
-    src.delete(); gray.delete(); blur.delete(); edges.delete(); contours.delete(); hierarchy.delete();
+    // Cleanup
+    src.delete(); gray.delete(); blur.delete(); edges.delete();
+    contours.delete(); hierarchy.delete();
 }
 
-// -------------------- CAPTURE BUTTON --------------------
-captureBtn.onclick = () => {
+// ====================== CAPTURE ======================
+document.getElementById("captureBtn").onclick = () => {
     if (!canCapture){
-        alert("Windshield not fully inside frame. Move closer & align.");
+        alert("Windshield NOT properly aligned. Move camera and try again.");
         return;
     }
 
-    let img = camCanvas.toDataURL("image/png");
-    console.log("Captured:", img);
-    alert("Windshield captured successfully!");
+    let data = camCanvas.toDataURL("image/png");
+    alert("Captured Successfully!");
+    console.log("Captured image:", data);
 };
 </script>
+
 
 </body>
 </html>
